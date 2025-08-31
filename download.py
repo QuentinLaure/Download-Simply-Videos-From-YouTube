@@ -1,11 +1,14 @@
-from yt_dlp import YoutubeDL
 import os
 import re
 import sys
-from typing import Optional, List, Dict, Tuple
-from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
+from typing import Optional, List, Dict, Tuple
+from urllib.parse import urlparse, parse_qs
+
+from yt_dlp import YoutubeDL
+
+from file_renaming import process_file_name
 
 
 @lru_cache(maxsize=128)
@@ -122,13 +125,13 @@ def parse_multiple_urls(input_string: str) -> List[str]:
     invalid_count = 0
     for url in urls:
         if ('youtube.com' in url or 'youtu.be' in url) and (
-            '/watch?' in url or
-            '/playlist?' in url or
-            '/@' in url or
-            '/channel/' in url or
-            '/c/' in url or
-            '/user/' in url or
-            'youtu.be/' in url
+                '/watch?' in url or
+                '/playlist?' in url or
+                '/@' in url or
+                '/channel/' in url or
+                '/c/' in url or
+                '/user/' in url or
+                'youtu.be/' in url
         ):
             valid_urls.append(url)
         elif url:  # Only show warning for non-empty strings
@@ -159,6 +162,65 @@ def get_available_formats(url: str) -> None:
             ydl.extract_info(url, download=False)
     except Exception as e:
         print(f"Error listing formats: {str(e)}")
+
+
+def extract_name(info):
+    artist = process_file_name((info.get("artist") or info.get("uploader", "")).strip())
+    track = process_file_name((info.get("track") or info.get("title", "")).strip())
+
+    if artist and track:
+        if artist.lower() in track.lower():
+            song_name = track  # use original title (already clean)
+        else:
+            song_name = f"{artist} - {track}"
+    else:
+        # Fallback: just use title
+        song_name = track
+
+    return song_name
+
+
+def download_playlist(playlist_url, output_path, file_extension, generic_ydl_opts):
+    # Fetch playlist information
+    ydl_opts = {
+        "quiet": True,  # don’t spam output
+        "extract_flat": True  # only metadata, no downloads yet
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        playlist_content = ydl.extract_info(playlist_url, download=False)
+
+    # Download playlist content
+    errors = []
+    generic_ydl_opts['quiet'] = True
+    playlist_iteration = 0
+    for entry in playlist_content["entries"]:
+        playlist_iteration += 1
+        video_name = "name not assigned yet"
+        try:
+            video_url = entry['url']
+            video_name = f"{extract_name(entry)}.{file_extension}"
+            print(
+                f"Playlist download progress : {playlist_iteration} / {len(playlist_content['entries'])}. Current = {entry['title']} , {video_url}")
+            generic_ydl_opts['outtmpl'] = os.path.join(output_path, video_name)
+            with YoutubeDL(generic_ydl_opts) as ydl:
+                ydl.download([video_url])
+        except Exception as e:
+            errors.append([url, video_name])
+            print(f"Error: {str(e)}")
+            return {
+                'url': playlist_url,
+                'success': False,
+                'message': f"❌ "
+            }
+
+    message = 'Playlist properly downloaded'
+    if len(errors) > 0:
+        message = f'Playlist partially downloaded. Errors with : {errors}'
+    return {
+        'url': url,
+        'success': True,
+        'message': message
+    }
 
 
 def download_single_video(url: str, output_path: str, thread_id: int = 0, audio_only: bool = False) -> dict:
@@ -230,18 +292,16 @@ def download_single_video(url: str, output_path: str, thread_id: int = 0, audio_
         print(f"🔍 [Debug] URL analysis: {content_type.title()}")
 
     if content_type == 'playlist':
-        ydl_opts['outtmpl'] = os.path.join(
-            output_path, '%(playlist_title)s', f'%(playlist_index)s-%(title)s.{file_extension}')
         print(
             f"📋 [Thread {thread_id}] Detected playlist URL. Downloading entire playlist...")
+        return download_playlist(url, output_path, file_extension, ydl_opts)
     elif content_type == 'channel':
         ydl_opts['outtmpl'] = os.path.join(
             output_path, '%(uploader)s', f'%(upload_date)s-%(title)s.{file_extension}')
         print(
             f"📺 [Thread {thread_id}] Detected channel URL. Downloading entire channel...")
     else:  # single video
-        ydl_opts['outtmpl'] = os.path.join(
-            output_path, f'%(title)s.{file_extension}')
+        ydl_opts['outtmpl'] = os.path.join(output_path, f"{extract_name(cached_info)}.{file_extension}")
         print(
             f"🎥 [Thread {thread_id}] Detected single video URL. Downloading {'audio' if audio_only else 'video'}...")
 
@@ -355,7 +415,7 @@ def download_youtube_content(urls: List[str], output_path: Optional[str] = None,
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_url = {
-            executor.submit(download_single_video, url, output_path, i+1, audio_only): url
+            executor.submit(download_single_video, url, output_path, i + 1, audio_only): url
             for i, url in enumerate(urls)
         }
 
@@ -449,14 +509,14 @@ if __name__ == "__main__":
             "\nChoose format:\n"
             "  1. MP4 Video (default)\n"
             "  2. MP3 Audio only\n"
-            "Enter choice (1-2, default=1): ").strip()
+            "Enter choice (1-2, default=2): ").strip()
 
         audio_only = False
-        if format_choice == '2':
+        if format_choice == '1':
+            print("🎥 Selected: MP4 Video")
+        else:
             audio_only = True
             print("🎵 Selected: MP3 Audio only")
-        else:
-            print("🎥 Selected: MP4 Video")
 
         # Only ask for concurrent workers if there are multiple URLs
         max_workers = 1  # Default for single URL
